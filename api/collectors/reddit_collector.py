@@ -6,16 +6,16 @@ Uses ScrapeCreators API - works from any IP, no OAuth required.
 
 import requests
 import time
-from datetime import datetime, timezone
 import os
+from datetime import datetime, timezone
 
-SCRAPECREATORS_API_KEY = os.environ.get("SCRAPECREATORS_API_KEY", "")
 BASE_URL = "https://api.scrapecreators.com/v1/reddit/subreddit"
 REQUEST_DELAY = 0.3
 
 
 def fetch_subreddit_hot(subreddit: str, limit: int = 25) -> list:
-    api_key = SCRAPECREATORS_API_KEY
+    # Read env var at call time, not module load time
+    api_key = os.environ.get("SCRAPECREATORS_API_KEY", "")
     if not api_key:
         print("[Reddit] SCRAPECREATORS_API_KEY env var not set")
         return []
@@ -52,18 +52,15 @@ def fetch_subreddit_hot(subreddit: str, limit: int = 25) -> list:
         if score < 5:
             continue
 
-        # With trim=true, url is already the full Reddit post URL
-        post_url = post.get("url", f"https://reddit.com/r/{subreddit}")
-
         posts.append({
             "id": post.get("id", ""),
             "title": post.get("title", ""),
-            "preview": "",  # trimmed response doesn't include selftext
+            "preview": "",
             "score": score,
             "num_comments": post.get("num_comments", 0),
             "engagement": score + post.get("num_comments", 0) * 3,
             "subreddit": post.get("subreddit", subreddit),
-            "url": post_url,
+            "url": post.get("url", f"https://reddit.com/r/{subreddit}"),
             "external_url": None,
             "is_text_post": False,
             "author": post.get("author", ""),
