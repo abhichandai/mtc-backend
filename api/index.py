@@ -247,7 +247,7 @@ def get_reddit_comments():
         resp = requests.get(
             "https://api.scrapecreators.com/v1/reddit/post/comments/simple",
             headers={"x-api-key": api_key, "Content-Type": "application/json"},
-            params={"url": post_url, "amount": amount, "trim": "true"},
+            params={"url": post_url, "amount": amount},
             timeout=15,
         )
         resp.raise_for_status()
@@ -257,7 +257,12 @@ def get_reddit_comments():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-    raw_comments = data.get("comments", [])
+    # ScrapeCreators may return comments under different keys
+    raw_comments = data.get("comments") or data.get("data", {}).get("comments") or []
+
+    # If still empty, log the actual keys for debugging
+    if not raw_comments:
+        print(f"[Comments] No comments found. Response keys: {list(data.keys())}, full: {str(data)[:300]}")
     comments = []
     for c in raw_comments:
         body = (c.get("body") or c.get("text") or "").strip()
@@ -284,6 +289,30 @@ def get_reddit_comments():
     }
     _cache_set(_reddit_comments_cache, cache_key, result, REDDIT_COMMENTS_CACHE_TTL)
     return jsonify(result)
+
+
+@app.route("/debug/comments")
+def debug_comments():
+    """See raw ScrapeCreators comments response"""
+    post_url = request.args.get("url", "https://www.reddit.com/r/productivity/comments/1rf6iqj/how_can_you_escape_the_hell_that_is_brain_fog")
+    api_key = os.environ.get("SCRAPECREATORS_API_KEY", "")
+    if not api_key:
+        return jsonify({"error": "no api key"})
+    try:
+        resp = requests.get(
+            "https://api.scrapecreators.com/v1/reddit/post/comments/simple",
+            headers={"x-api-key": api_key},
+            params={"url": post_url, "amount": 3},
+            timeout=15,
+        )
+        data = resp.json()
+        return jsonify({
+            "http_status": resp.status_code,
+            "top_level_keys": list(data.keys()),
+            "raw_sample": str(data)[:800],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 @app.route("/health")
@@ -364,4 +393,5 @@ def debug_reddit2():
         steps.append({"step": "5_collector_function", "ok": False, "error": str(e)})
 
     return jsonify({"steps": steps})
+
 
