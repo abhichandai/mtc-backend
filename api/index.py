@@ -44,9 +44,11 @@ google_rss_collector = GoogleTrendsRSS()
 
 # ── IN-MEMORY CACHES ─────────────────────────────────────────────────────────
 _reddit_cache  = {}
+_reddit_comments_cache = {}
 _twitter_search_cache = {}
-REDDIT_CACHE_TTL  = 1800   # 30 min
-TWITTER_CACHE_TTL = 3600   # 1 hr
+REDDIT_CACHE_TTL          = 1800   # 30 min
+REDDIT_COMMENTS_CACHE_TTL = 3600   # 1 hr
+TWITTER_CACHE_TTL         = 3600   # 1 hr
 
 def _cache_get(store, key):
     entry = store.get(key)
@@ -223,6 +225,67 @@ def get_reddit_trends():
     return jsonify({"success": False, "error": "Failed to fetch Reddit data"}), 500
 
 
+@app.route("/trends/reddit/comments")
+def get_reddit_comments():
+    post_url = request.args.get("url", "").strip()
+    if not post_url:
+        return jsonify({"success": False, "error": "url parameter required"}), 400
+
+    amount = min(request.args.get("amount", type=int, default=15), 25)
+    cache_key = hashlib.md5(post_url.encode()).hexdigest()
+
+    cached = _cache_get(_reddit_comments_cache, cache_key)
+    if cached:
+        cached["cached"] = True
+        return jsonify(cached)
+
+    api_key = os.environ.get("SCRAPECREATORS_API_KEY", "")
+    if not api_key:
+        return jsonify({"success": False, "error": "SCRAPECREATORS_API_KEY not set"}), 500
+
+    try:
+        resp = requests.get(
+            "https://api.scrapecreators.com/v1/reddit/post/comments/simple",
+            headers={"x-api-key": api_key, "Content-Type": "application/json"},
+            params={"url": post_url, "amount": amount, "trim": "true"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.exceptions.RequestException as e:
+        return jsonify({"success": False, "error": f"ScrapeCreators error: {e}"}), 502
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+    raw_comments = data.get("comments", [])
+    comments = []
+    for c in raw_comments:
+        body = (c.get("body") or c.get("text") or "").strip()
+        if not body or body == "[deleted]" or body == "[removed]":
+            continue
+        comments.append({
+            "id": c.get("id", ""),
+            "body": body,
+            "score": c.get("score", c.get("ups", 0)),
+            "author": c.get("author", ""),
+            "created_utc": c.get("created_utc", 0),
+        })
+
+    # Sort by score so highest-resonance comments come first
+    comments.sort(key=lambda x: x["score"], reverse=True)
+
+    result = {
+        "success": True,
+        "post_url": post_url,
+        "comments": comments,
+        "count": len(comments),
+        "cached": False,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _cache_set(_reddit_comments_cache, cache_key, result, REDDIT_COMMENTS_CACHE_TTL)
+    return jsonify(result)
+
+
 @app.route("/health")
 def health():
     return jsonify({"status": "healthy", "timestamp": datetime.utcnow().isoformat()})
@@ -301,3 +364,4 @@ def debug_reddit2():
         steps.append({"step": "5_collector_function", "ok": False, "error": str(e)})
 
     return jsonify({"steps": steps})
+
