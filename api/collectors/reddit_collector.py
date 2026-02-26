@@ -21,7 +21,7 @@ def fetch_subreddit_hot(subreddit: str, limit: int = 25) -> list:
         return []
 
     headers = {"x-api-key": api_key, "Content-Type": "application/json"}
-    params = {"subreddit": subreddit, "sort": "hot", "timeframe": "day", "trim": "true"}
+    params = {"subreddit": subreddit, "sort": "hot", "trim": "true"}
 
     try:
         resp = requests.get(BASE_URL, headers=headers, params=params, timeout=15)
@@ -103,3 +103,4 @@ def fetch_multiple_subreddits(subreddits: list, limit_per_sub: int = 20) -> dict
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "source": "scrapecreators",
     }
+
