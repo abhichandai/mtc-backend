@@ -11,10 +11,38 @@ from datetime import datetime, timezone
 
 BASE_URL = "https://api.scrapecreators.com/v1/reddit/subreddit"
 REQUEST_DELAY = 0.3
+MAX_PER_SUBREDDIT = 3   # max cards per subreddit in final results
+
+
+def _velocity_score(post: dict) -> float:
+    """
+    Rank by comment velocity × upvote quality, with soft age decay.
+
+    Formula:
+      base     = (num_comments / max(hours_since_posted, 0.5)) × upvote_ratio
+      age_factor = 1.0 for posts ≤ 48h old
+                 = sqrt(48 / hours) for older posts (soft decay — active old
+                   threads still surface, they just need more velocity)
+      final    = base × age_factor
+    """
+    now = time.time()
+    created = post.get("created_utc", 0)
+    hours = max((now - created) / 3600, 0.5)  # avoid div/0
+
+    comments = post.get("num_comments", 0)
+    ratio = post.get("upvote_ratio", 0.5)
+
+    base = (comments / hours) * ratio
+
+    if hours <= 48:
+        age_factor = 1.0
+    else:
+        age_factor = (48 / hours) ** 0.5  # square-root decay, not a hard cutoff
+
+    return base * age_factor
 
 
 def fetch_subreddit_hot(subreddit: str, limit: int = 25) -> list:
-    # Read env var at call time, not module load time
     api_key = os.environ.get("SCRAPECREATORS_API_KEY", "")
     if not api_key:
         print("[Reddit] SCRAPECREATORS_API_KEY env var not set")
@@ -52,21 +80,22 @@ def fetch_subreddit_hot(subreddit: str, limit: int = 25) -> list:
         if score < 5:
             continue
 
+        created = post.get("created_utc", 0)
+
         posts.append({
             "id": post.get("id", ""),
             "title": post.get("title", ""),
-            "preview": "",
+            "preview": post.get("selftext", "") or "",   # capture post body if present
             "score": score,
             "num_comments": post.get("num_comments", 0),
-            "engagement": score + post.get("num_comments", 0) * 3,
+            "upvote_ratio": post.get("upvote_ratio", 0),
             "subreddit": post.get("subreddit", subreddit),
             "url": post.get("url", f"https://reddit.com/r/{subreddit}"),
             "external_url": None,
-            "is_text_post": False,
+            "is_text_post": bool(post.get("is_self", False)),
             "author": post.get("author", ""),
-            "created_utc": post.get("created_utc", 0),
-            "flair": post.get("link_flair_text", ""),
-            "upvote_ratio": post.get("upvote_ratio", 0),
+            "created_utc": created,
+            "flair": post.get("link_flair_text", "") or "",
             "source": "reddit",
         })
 
@@ -85,8 +114,7 @@ def fetch_multiple_subreddits(subreddits: list, limit_per_sub: int = 20) -> dict
             failed_subs.append(subreddit)
         time.sleep(REQUEST_DELAY)
 
-    all_posts.sort(key=lambda p: p["engagement"], reverse=True)
-
+    # Deduplicate by title
     seen, deduped = set(), []
     for post in all_posts:
         key = post["title"].lower().strip()
@@ -94,13 +122,24 @@ def fetch_multiple_subreddits(subreddits: list, limit_per_sub: int = 20) -> dict
             seen.add(key)
             deduped.append(post)
 
+    # Rank by velocity score
+    deduped.sort(key=_velocity_score, reverse=True)
+
+    # Cap at MAX_PER_SUBREDDIT per subreddit so no single community dominates
+    sub_counts: dict = {}
+    capped = []
+    for post in deduped:
+        sub = post["subreddit"].lower()
+        if sub_counts.get(sub, 0) < MAX_PER_SUBREDDIT:
+            capped.append(post)
+            sub_counts[sub] = sub_counts.get(sub, 0) + 1
+
     return {
         "success": True,
-        "posts": deduped,
-        "count": len(deduped),
+        "posts": capped,
+        "count": len(capped),
         "subreddits_fetched": fetched_subs,
         "subreddits_failed": failed_subs,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "source": "scrapecreators",
     }
-
