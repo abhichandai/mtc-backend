@@ -252,3 +252,52 @@ def debug_reddit():
         except Exception as e:
             result["error"] = str(e)
     return jsonify(result)
+
+
+@app.route("/debug/reddit2")
+def debug_reddit2():
+    """Step-by-step diagnostic calling the actual collector code"""
+    import os
+    import requests as req
+
+    steps = []
+
+    # Step 1: env var
+    api_key = os.environ.get("SCRAPECREATORS_API_KEY", "")
+    steps.append({"step": "1_env_var", "ok": bool(api_key), "value": api_key[:6] + "..." if api_key else "MISSING"})
+
+    # Step 2: raw API call identical to collector
+    if api_key:
+        try:
+            resp = req.get(
+                "https://api.scrapecreators.com/v1/reddit/subreddit",
+                headers={"x-api-key": api_key, "Content-Type": "application/json"},
+                params={"subreddit": "ChatGPT", "sort": "hot", "timeframe": "day", "trim": "true"},
+                timeout=15
+            )
+            data = resp.json()
+            raw_posts = data.get("posts", [])
+            steps.append({"step": "2_api_call", "ok": True, "status": resp.status_code, "post_count": len(raw_posts)})
+
+            # Step 3: filter (score >= 5)
+            filtered = [p for p in raw_posts if p.get("score", p.get("ups", 0)) >= 5]
+            steps.append({"step": "3_filter_score_gte_5", "ok": True, "count_before": len(raw_posts), "count_after": len(filtered)})
+
+            # Step 4: show first post raw
+            if filtered:
+                steps.append({"step": "4_first_post_raw", "ok": True, "post": {k: filtered[0].get(k) for k in ["id","title","score","num_comments","url"]}})
+            else:
+                steps.append({"step": "4_first_post_raw", "ok": False, "reason": "no posts passed filter"})
+
+        except Exception as e:
+            steps.append({"step": "2_api_call", "ok": False, "error": str(e)})
+
+    # Step 5: call actual collector function
+    try:
+        from collectors.reddit_collector import fetch_subreddit_hot
+        result = fetch_subreddit_hot("ChatGPT", limit=5)
+        steps.append({"step": "5_collector_function", "ok": True, "count": len(result), "first_title": result[0]["title"] if result else None})
+    except Exception as e:
+        steps.append({"step": "5_collector_function", "ok": False, "error": str(e)})
+
+    return jsonify({"steps": steps})
