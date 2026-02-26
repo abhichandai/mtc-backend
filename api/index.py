@@ -257,21 +257,25 @@ def get_reddit_comments():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
+    # Extract post body (selftext) from the post object — use as preview on the card
+    post_obj = data.get("post", {})
+    post_body = (post_obj.get("selftext") or "").strip()
+    # Clean up common Reddit artifacts
+    if post_body in ("[deleted]", "[removed]", ""):
+        post_body = ""
+
     # Handle different response structures from ScrapeCreators
-    # New /post/comments endpoint returns: { comments: [...] } or { data: { comments: [...] } }
     raw_comments = (
         data.get("comments") or
         data.get("data", {}).get("comments") or
         []
     )
 
-    # If still empty, log the actual keys for debugging
     if not raw_comments:
         print(f"[Comments] Empty. Keys: {list(data.keys())} | Sample: {str(data)[:400]}")
 
     comments = []
     for c in raw_comments:
-        # Handle both flat and nested comment body fields
         body = (c.get("body") or c.get("text") or c.get("selftext") or "").strip()
         if not body or body in ("[deleted]", "[removed]"):
             continue
@@ -289,6 +293,7 @@ def get_reddit_comments():
     result = {
         "success": True,
         "post_url": post_url,
+        "post_body": post_body,          # selftext — shown as preview in panel
         "comments": comments,
         "count": len(comments),
         "cached": False,
@@ -400,6 +405,7 @@ def debug_reddit2():
         steps.append({"step": "5_collector_function", "ok": False, "error": str(e)})
 
     return jsonify({"steps": steps})
+
 
 
 
