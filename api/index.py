@@ -245,9 +245,9 @@ def get_reddit_comments():
 
     try:
         resp = requests.get(
-            "https://api.scrapecreators.com/v1/reddit/post/comments/simple",
+            "https://api.scrapecreators.com/v1/reddit/post/comments",
             headers={"x-api-key": api_key, "Content-Type": "application/json"},
-            params={"url": post_url, "amount": amount},
+            params={"url": post_url, "trim": "false"},
             timeout=15,
         )
         resp.raise_for_status()
@@ -257,16 +257,23 @@ def get_reddit_comments():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-    # ScrapeCreators may return comments under different keys
-    raw_comments = data.get("comments") or data.get("data", {}).get("comments") or []
+    # Handle different response structures from ScrapeCreators
+    # New /post/comments endpoint returns: { comments: [...] } or { data: { comments: [...] } }
+    raw_comments = (
+        data.get("comments") or
+        data.get("data", {}).get("comments") or
+        []
+    )
 
     # If still empty, log the actual keys for debugging
     if not raw_comments:
-        print(f"[Comments] No comments found. Response keys: {list(data.keys())}, full: {str(data)[:300]}")
+        print(f"[Comments] Empty. Keys: {list(data.keys())} | Sample: {str(data)[:400]}")
+
     comments = []
     for c in raw_comments:
-        body = (c.get("body") or c.get("text") or "").strip()
-        if not body or body == "[deleted]" or body == "[removed]":
+        # Handle both flat and nested comment body fields
+        body = (c.get("body") or c.get("text") or c.get("selftext") or "").strip()
+        if not body or body in ("[deleted]", "[removed]"):
             continue
         comments.append({
             "id": c.get("id", ""),
@@ -300,9 +307,9 @@ def debug_comments():
         return jsonify({"error": "no api key"})
     try:
         resp = requests.get(
-            "https://api.scrapecreators.com/v1/reddit/post/comments/simple",
+            "https://api.scrapecreators.com/v1/reddit/post/comments",
             headers={"x-api-key": api_key},
-            params={"url": post_url, "amount": 3},
+            params={"url": post_url, "trim": "false"},
             timeout=15,
         )
         data = resp.json()
@@ -393,5 +400,6 @@ def debug_reddit2():
         steps.append({"step": "5_collector_function", "ok": False, "error": str(e)})
 
     return jsonify({"steps": steps})
+
 
 
