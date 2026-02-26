@@ -15,34 +15,21 @@ REQUEST_DELAY = 0.3
 
 
 def fetch_subreddit_hot(subreddit: str, limit: int = 25) -> list:
-    """
-    Fetch hot posts from a single subreddit via ScrapeCreators API.
-    Returns list of normalised post dicts, or empty list on failure.
-    """
     api_key = SCRAPECREATORS_API_KEY
     if not api_key:
         print("[Reddit] SCRAPECREATORS_API_KEY env var not set")
         return []
 
-    headers = {
-        "x-api-key": api_key,
-        "Content-Type": "application/json",
-    }
-    params = {
-        "subreddit": subreddit,
-        "sort": "hot",
-        "timeframe": "day",
-        "trim": "true",
-    }
+    headers = {"x-api-key": api_key, "Content-Type": "application/json"}
+    params = {"subreddit": subreddit, "sort": "hot", "timeframe": "day", "trim": "true"}
 
     try:
         resp = requests.get(BASE_URL, headers=headers, params=params, timeout=15)
-
         if resp.status_code == 401:
-            print(f"[Reddit] Invalid API key")
+            print("[Reddit] Invalid API key")
             return []
         if resp.status_code == 402:
-            print(f"[Reddit] Out of ScrapeCreators credits")
+            print("[Reddit] Out of ScrapeCreators credits")
             return []
         if resp.status_code == 404:
             print(f"[Reddit] Subreddit r/{subreddit} not found")
@@ -50,10 +37,8 @@ def fetch_subreddit_hot(subreddit: str, limit: int = 25) -> list:
         if resp.status_code == 429:
             print(f"[Reddit] Rate limited on r/{subreddit}")
             return []
-
         resp.raise_for_status()
         data = resp.json()
-
     except requests.exceptions.RequestException as e:
         print(f"[Reddit] Error fetching r/{subreddit}: {e}")
         return []
@@ -63,27 +48,24 @@ def fetch_subreddit_hot(subreddit: str, limit: int = 25) -> list:
 
     posts = []
     for post in data.get("posts", []):
-        # Skip stickied/mod posts and very low engagement
-        if post.get("stickied") or post.get("distinguished") == "moderator":
-            continue
         score = post.get("score", post.get("ups", 0))
         if score < 5:
             continue
 
-        selftext = post.get("selftext", "").strip()
-        preview = selftext[:280] + "..." if len(selftext) > 280 else selftext
+        # With trim=true, url is already the full Reddit post URL
+        post_url = post.get("url", f"https://reddit.com/r/{subreddit}")
 
         posts.append({
             "id": post.get("id", ""),
             "title": post.get("title", ""),
-            "preview": preview,
+            "preview": "",  # trimmed response doesn't include selftext
             "score": score,
             "num_comments": post.get("num_comments", 0),
             "engagement": score + post.get("num_comments", 0) * 3,
             "subreddit": post.get("subreddit", subreddit),
-            "url": f"https://reddit.com{post.get('permalink', '')}",
-            "external_url": post.get("url", "") if not post.get("is_self") else None,
-            "is_text_post": post.get("is_self", False),
+            "url": post_url,
+            "external_url": None,
+            "is_text_post": False,
             "author": post.get("author", ""),
             "created_utc": post.get("created_utc", 0),
             "flair": post.get("link_flair_text", ""),
@@ -95,9 +77,6 @@ def fetch_subreddit_hot(subreddit: str, limit: int = 25) -> list:
 
 
 def fetch_multiple_subreddits(subreddits: list, limit_per_sub: int = 20) -> dict:
-    """
-    Fetch hot posts from multiple subreddits and merge into a unified feed.
-    """
     all_posts, fetched_subs, failed_subs = [], [], []
 
     for subreddit in subreddits:
