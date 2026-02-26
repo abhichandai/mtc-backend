@@ -226,3 +226,29 @@ def get_reddit_trends():
 @app.route("/health")
 def health():
     return jsonify({"status": "healthy", "timestamp": datetime.utcnow().isoformat()})
+
+
+@app.route("/debug/reddit")
+def debug_reddit():
+    import os
+    import requests as req
+    api_key = os.environ.get("SCRAPECREATORS_API_KEY", "")
+    result = {
+        "api_key_set": bool(api_key),
+        "api_key_prefix": api_key[:6] + "..." if api_key else "MISSING"
+    }
+    if api_key:
+        try:
+            resp = req.get(
+                "https://api.scrapecreators.com/v1/reddit/subreddit",
+                headers={"x-api-key": api_key},
+                params={"subreddit": "ChatGPT", "sort": "hot", "trim": "true"},
+                timeout=15
+            )
+            data = resp.json()
+            result["http_status"] = resp.status_code
+            result["response_keys"] = list(data.keys())
+            result["post_count"] = len(data.get("posts", []))
+        except Exception as e:
+            result["error"] = str(e)
+    return jsonify(result)
