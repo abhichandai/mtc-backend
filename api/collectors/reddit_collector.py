@@ -91,6 +91,9 @@ def fetch_subreddit_hot(subreddit: str, limit: int = 25) -> list:
             "num_comments": post.get("num_comments", 0),
             "upvote_ratio": post.get("upvote_ratio", 0),
             "subreddit": post.get("subreddit", subreddit),
+            # permalink is always the Reddit thread URL — use this for comments
+            # url may point to an external article for link posts
+            "permalink": f"https://reddit.com{post.get('permalink', '')}" if post.get('permalink') else f"https://reddit.com/r/{subreddit}/comments/{post.get('id', '')}",
             "url": post.get("url", f"https://reddit.com/r/{subreddit}"),
             "external_url": None,
             "is_text_post": bool(post.get("is_self", False)),
