@@ -78,7 +78,8 @@ def fetch_subreddit_hot(subreddit: str, limit: int = 25) -> list:
     posts = []
     for post in data.get("posts", []):
         score = post.get("score", post.get("ups", 0))
-        if score < 5:
+        num_comments = post.get('num_comments', 0)
+        if score < 5 or num_comments < 15:
             continue
 
         created = post.get("created_utc", 0)
