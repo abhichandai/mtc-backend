@@ -8,6 +8,7 @@ import requests
 import time
 import os
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://api.scrapecreators.com/v1/reddit/subreddit"
 REQUEST_DELAY = 0.3
@@ -52,7 +53,7 @@ def fetch_subreddit_hot(subreddit: str, limit: int = 25) -> list:
     params = {"subreddit": subreddit, "sort": "hot", "trim": "true"}
 
     try:
-        resp = requests.get(BASE_URL, headers=headers, params=params, timeout=15)
+        resp = requests.get(BASE_URL, headers=headers, params=params, timeout=8)
         if resp.status_code == 401:
             print("[Reddit] Invalid API key")
             return []
@@ -105,14 +106,24 @@ def fetch_subreddit_hot(subreddit: str, limit: int = 25) -> list:
 def fetch_multiple_subreddits(subreddits: list, limit_per_sub: int = 20) -> dict:
     all_posts, fetched_subs, failed_subs = [], [], []
 
-    for subreddit in subreddits:
-        posts = fetch_subreddit_hot(subreddit, limit=limit_per_sub)
-        if posts:
-            all_posts.extend(posts)
-            fetched_subs.append(subreddit)
-        else:
-            failed_subs.append(subreddit)
-        time.sleep(REQUEST_DELAY)
+    # Fetch all subreddits in parallel — total time = slowest single request, not sum
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_sub = {
+            executor.submit(fetch_subreddit_hot, sub, limit_per_sub): sub
+            for sub in subreddits
+        }
+        for future in as_completed(future_to_sub):
+            sub = future_to_sub[future]
+            try:
+                posts = future.result()
+                if posts:
+                    all_posts.extend(posts)
+                    fetched_subs.append(sub)
+                else:
+                    failed_subs.append(sub)
+            except Exception as e:
+                print(f"[Reddit] Future error for r/{sub}: {e}")
+                failed_subs.append(sub)
 
     # Deduplicate by title
     seen, deduped = set(), []
