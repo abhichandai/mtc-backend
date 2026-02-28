@@ -133,22 +133,14 @@ def fetch_multiple_subreddits(subreddits: list, limit_per_sub: int = 20) -> dict
             seen.add(key)
             deduped.append(post)
 
-    # Rank by velocity score
+    # Rank by pure velocity — no per-subreddit cap
+    # If Claude picked good subreddits, best content wins regardless of source
     deduped.sort(key=_velocity_score, reverse=True)
-
-    # Cap at MAX_PER_SUBREDDIT per subreddit so no single community dominates
-    sub_counts: dict = {}
-    capped = []
-    for post in deduped:
-        sub = post["subreddit"].lower()
-        if sub_counts.get(sub, 0) < MAX_PER_SUBREDDIT:
-            capped.append(post)
-            sub_counts[sub] = sub_counts.get(sub, 0) + 1
 
     return {
         "success": True,
-        "posts": capped,
-        "count": len(capped),
+        "posts": deduped,
+        "count": len(deduped),
         "subreddits_fetched": fetched_subs,
         "subreddits_failed": failed_subs,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
