@@ -351,44 +351,52 @@ def debug_comments():
                 "replies_is": type(replies).__name__,
             })
 
-        # Find first comment that has non-empty replies to inspect
+        # Find first comment that has non-empty replies.items to inspect
         replies_structure_sample = None
+        def count_tree(clist):
+            total = 0
+            for c in clist:
+                total += 1
+                r = c.get("replies", {})
+                items = r.get("items", []) if isinstance(r, dict) else []
+                if isinstance(items, list) and items:
+                    total += count_tree(items)
+            return total
+
+        total_tree_count = count_tree(comments)
+
         for c in comments:
-            r = c.get("replies")
-            if r:
-                replies_type = type(r).__name__
-                if isinstance(r, dict):
-                    # Show keys and one value sample
-                    rkeys = list(r.keys())[:5]
-                    first_reply_val = next(iter(r.values()), None) if r else None
-                    first_reply_type = type(first_reply_val).__name__ if first_reply_val is not None else "none"
-                    first_reply_keys = list(first_reply_val.keys()) if isinstance(first_reply_val, dict) else str(first_reply_val)[:200]
-                    replies_structure_sample = {
-                        "parent_comment_score": c.get("score"),
-                        "parent_body_snippet": (c.get("body") or "")[:80],
-                        "replies_type": replies_type,
-                        "replies_dict_key_count": len(r),
-                        "sample_dict_keys": rkeys,
-                        "first_reply_value_type": first_reply_type,
-                        "first_reply_keys": first_reply_keys,
-                        "first_reply_body": (first_reply_val.get("body") or "")[:120] if isinstance(first_reply_val, dict) else None,
-                        "first_reply_score": first_reply_val.get("score") if isinstance(first_reply_val, dict) else None,
-                        "first_reply_depth": first_reply_val.get("depth") if isinstance(first_reply_val, dict) else None,
-                    }
-                elif isinstance(r, list):
-                    replies_structure_sample = {
-                        "replies_type": "list",
-                        "replies_list_length": len(r),
-                        "first_reply_keys": list(r[0].keys()) if r else [],
-                    }
-                break
+            r = c.get("replies", {})
+            if not isinstance(r, dict):
+                continue
+            items = r.get("items", [])
+            if not isinstance(items, list) or not items:
+                continue
+            # Found a comment with actual reply items
+            first_reply = items[0]
+            first_reply_keys = list(first_reply.keys()) if isinstance(first_reply, dict) else []
+            # Check if the reply itself has replies.items
+            nested_replies = first_reply.get("replies", {}) if isinstance(first_reply, dict) else {}
+            nested_items = nested_replies.get("items", []) if isinstance(nested_replies, dict) else []
+            replies_structure_sample = {
+                "parent_score": c.get("score"),
+                "parent_body_snippet": (c.get("body") or "")[:80],
+                "items_count_in_replies": len(items),
+                "first_reply_keys": first_reply_keys,
+                "first_reply_body": (first_reply.get("body") or "")[:120] if isinstance(first_reply, dict) else None,
+                "first_reply_score": first_reply.get("score") if isinstance(first_reply, dict) else None,
+                "first_reply_depth": first_reply.get("depth") if isinstance(first_reply, dict) else None,
+                "first_reply_created_utc": first_reply.get("created_utc") if isinstance(first_reply, dict) else None,
+                "first_reply_controversiality": first_reply.get("controversiality") if isinstance(first_reply, dict) else None,
+                "first_reply_has_nested_replies_items": isinstance(nested_items, list) and len(nested_items) > 0,
+                "first_reply_nested_replies_count": len(nested_items) if isinstance(nested_items, list) else 0,
+            }
+            break
 
         return jsonify({
             "http_status": resp.status_code,
-            "top_level_keys": list(data.keys()),
-            "more_key_value": str(more)[:200] if more else None,
             "top_level_comment_count": len(comments),
-            "first_comment_keys": first_comment_keys,
+            "total_tree_count_all_depths": total_tree_count,
             "first_comment_has_replies_field": has_replies,
             "top_3_comments_sample": sample,
             "replies_structure_of_first_non_empty": replies_structure_sample,
