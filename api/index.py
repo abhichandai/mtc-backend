@@ -305,7 +305,7 @@ def get_reddit_comments():
 
 @app.route("/debug/comments")
 def debug_comments():
-    """See raw ScrapeCreators comments response"""
+    """Inspect raw ScrapeCreators comment structure"""
     post_url = request.args.get("url", "https://www.reddit.com/r/productivity/comments/1rf6iqj/how_can_you_escape_the_hell_that_is_brain_fog")
     api_key = os.environ.get("SCRAPECREATORS_API_KEY", "")
     if not api_key:
@@ -318,10 +318,49 @@ def debug_comments():
             timeout=15,
         )
         data = resp.json()
+        comments = data.get("comments", [])
+        more = data.get("more", None)
+
+        # Inspect the first comment in full detail
+        first_comment = comments[0] if comments else {}
+        first_comment_keys = list(first_comment.keys()) if first_comment else []
+        has_replies = "replies" in first_comment
+        replies_sample = first_comment.get("replies", [])
+        replies_count_first = len(replies_sample) if isinstance(replies_sample, list) else "not a list"
+
+        # Count total comments including nested replies recursively
+        def count_all(clist):
+            total = 0
+            for c in clist:
+                total += 1
+                replies = c.get("replies", [])
+                if isinstance(replies, list):
+                    total += count_all(replies)
+            return total
+
+        total_including_replies = count_all(comments)
+
+        # Sample of top 3 comments: just id, score, body snippet, reply count
+        sample = []
+        for c in comments[:3]:
+            replies = c.get("replies", [])
+            sample.append({
+                "score": c.get("score", c.get("ups", "?")),
+                "body_snippet": (c.get("body") or c.get("text") or "")[:120],
+                "reply_count": len(replies) if isinstance(replies, list) else 0,
+                "replies_is": type(replies).__name__,
+            })
+
         return jsonify({
             "http_status": resp.status_code,
             "top_level_keys": list(data.keys()),
-            "raw_sample": str(data)[:800],
+            "more_key_value": str(more)[:200] if more else None,
+            "top_level_comment_count": len(comments),
+            "total_including_nested_replies": total_including_replies,
+            "first_comment_keys": first_comment_keys,
+            "first_comment_has_replies_field": has_replies,
+            "replies_count_in_first_comment": replies_count_first,
+            "top_3_comments_sample": sample,
         })
     except Exception as e:
         return jsonify({"error": str(e)})
