@@ -351,16 +351,47 @@ def debug_comments():
                 "replies_is": type(replies).__name__,
             })
 
+        # Find first comment that has non-empty replies to inspect
+        replies_structure_sample = None
+        for c in comments:
+            r = c.get("replies")
+            if r:
+                replies_type = type(r).__name__
+                if isinstance(r, dict):
+                    # Show keys and one value sample
+                    rkeys = list(r.keys())[:5]
+                    first_reply_val = next(iter(r.values()), None) if r else None
+                    first_reply_type = type(first_reply_val).__name__ if first_reply_val is not None else "none"
+                    first_reply_keys = list(first_reply_val.keys()) if isinstance(first_reply_val, dict) else str(first_reply_val)[:200]
+                    replies_structure_sample = {
+                        "parent_comment_score": c.get("score"),
+                        "parent_body_snippet": (c.get("body") or "")[:80],
+                        "replies_type": replies_type,
+                        "replies_dict_key_count": len(r),
+                        "sample_dict_keys": rkeys,
+                        "first_reply_value_type": first_reply_type,
+                        "first_reply_keys": first_reply_keys,
+                        "first_reply_body": (first_reply_val.get("body") or "")[:120] if isinstance(first_reply_val, dict) else None,
+                        "first_reply_score": first_reply_val.get("score") if isinstance(first_reply_val, dict) else None,
+                        "first_reply_depth": first_reply_val.get("depth") if isinstance(first_reply_val, dict) else None,
+                    }
+                elif isinstance(r, list):
+                    replies_structure_sample = {
+                        "replies_type": "list",
+                        "replies_list_length": len(r),
+                        "first_reply_keys": list(r[0].keys()) if r else [],
+                    }
+                break
+
         return jsonify({
             "http_status": resp.status_code,
             "top_level_keys": list(data.keys()),
             "more_key_value": str(more)[:200] if more else None,
             "top_level_comment_count": len(comments),
-            "total_including_nested_replies": total_including_replies,
             "first_comment_keys": first_comment_keys,
             "first_comment_has_replies_field": has_replies,
-            "replies_count_in_first_comment": replies_count_first,
             "top_3_comments_sample": sample,
+            "replies_structure_of_first_non_empty": replies_structure_sample,
         })
     except Exception as e:
         return jsonify({"error": str(e)})
