@@ -393,12 +393,29 @@ def debug_comments():
             }
             break
 
+        # Reply distribution: how many top-level comments have 0, 1-3, 4-10, 10+ replies
+        distribution = {"0": 0, "1-3": 0, "4-10": 0, "10+": 0}
+        chain_lengths = []
+        for c in comments:
+            r = c.get("replies", {})
+            items = r.get("items", []) if isinstance(r, dict) else []
+            n = len(items) if isinstance(items, list) else 0
+            chain_lengths.append({"score": c.get("score"), "reply_count": n, "body": (c.get("body") or "")[:60]})
+            if n == 0: distribution["0"] += 1
+            elif n <= 3: distribution["1-3"] += 1
+            elif n <= 10: distribution["4-10"] += 1
+            else: distribution["10+"] += 1
+
+        # Sort by reply count descending to surface most active chains
+        chain_lengths.sort(key=lambda x: x["reply_count"], reverse=True)
+
         return jsonify({
             "http_status": resp.status_code,
             "top_level_comment_count": len(comments),
             "total_tree_count_all_depths": total_tree_count,
             "first_comment_has_replies_field": has_replies,
-            "top_3_comments_sample": sample,
+            "reply_distribution": distribution,
+            "most_active_chains_top10": chain_lengths[:10],
             "replies_structure_of_first_non_empty": replies_structure_sample,
         })
     except Exception as e:
