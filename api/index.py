@@ -274,26 +274,38 @@ def get_reddit_comments():
     if not raw_comments:
         print(f"[Comments] Empty. Keys: {list(data.keys())} | Sample: {str(data)[:400]}")
 
-    comments = []
-    for c in raw_comments:
-        body = (c.get("body") or c.get("text") or c.get("selftext") or "").strip()
-        if not body or body in ("[deleted]", "[removed]"):
-            continue
-        comments.append({
-            "id": c.get("id", ""),
-            "body": body,
-            "score": c.get("score", c.get("ups", 0)),
-            "author": c.get("author", ""),
-            "created_utc": c.get("created_utc", 0),
-        })
+    # Recursively flatten the full comment tree including nested replies
+    def flatten_comments(clist, results):
+        for c in clist:
+            body = (c.get("body") or c.get("text") or c.get("selftext") or "").strip()
+            if body and body not in ("[deleted]", "[removed]"):
+                results.append({
+                    "id": c.get("id", ""),
+                    "body": body,
+                    "score": c.get("score", c.get("ups", 0)),
+                    "author": c.get("author", ""),
+                    "created_utc": c.get("created_utc", 0),
+                    "depth": c.get("depth", 0),
+                    "parent_id": c.get("parent_id", ""),
+                    "controversiality": c.get("controversiality", 0),
+                })
+            # Traverse replies.items recursively
+            replies = c.get("replies", {})
+            if isinstance(replies, dict):
+                nested = replies.get("items", [])
+                if isinstance(nested, list) and nested:
+                    flatten_comments(nested, results)
 
-    # Sort by score so highest-resonance comments come first
+    comments = []
+    flatten_comments(raw_comments, comments)
+
+    # Sort by score descending — highest community resonance first
     comments.sort(key=lambda x: x["score"], reverse=True)
 
     result = {
         "success": True,
         "post_url": post_url,
-        "post_body": post_body,          # selftext — shown as preview in panel
+        "post_body": post_body,
         "comments": comments,
         "count": len(comments),
         "cached": False,
