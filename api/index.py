@@ -46,9 +46,11 @@ google_rss_collector = GoogleTrendsRSS()
 _reddit_cache  = {}
 _reddit_comments_cache = {}
 _twitter_search_cache = {}
+_pulse_trends_cache = {}
 REDDIT_CACHE_TTL          = 1800   # 30 min
 REDDIT_COMMENTS_CACHE_TTL = 3600   # 1 hr
 TWITTER_CACHE_TTL         = 3600   # 1 hr
+PULSE_TRENDS_CACHE_TTL    = 3600   # 1 hr — Pulse Chunk 1 raw trends
 
 def _cache_get(store, key):
     entry = store.get(key)
@@ -60,6 +62,51 @@ def _cache_get(store, key):
 
 def _cache_set(store, key, data, ttl):
     store[key] = {"data": data, "expires": time.time() + ttl}
+
+
+# ── PULSE HELPERS ────────────────────────────────────────────────────────────
+import re
+import unicodedata
+
+def _slugify(text, max_len=60):
+    """ASCII-safe lowercase slug. Handles unicode (e.g. 'alavés' → 'alaves')."""
+    if not text:
+        return "trend"
+    nkfd = unicodedata.normalize("NFKD", str(text))
+    ascii_text = nkfd.encode("ascii", "ignore").decode("ascii").lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text).strip("-")
+    return (slug or "trend")[:max_len]
+
+def _normalize_trend(raw):
+    """Map a raw SerpAPI trending_search dict to the Pulse trend schema.
+    Defensive: never throw on missing fields, return null instead."""
+    query = raw.get("query", "") or ""
+    start_ts = raw.get("start_timestamp")  # Unix seconds
+    started_at_iso = None
+    hours_trending = None
+    if isinstance(start_ts, (int, float)) and start_ts > 0:
+        try:
+            started_at_iso = datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat()
+            hours_trending = round((time.time() - start_ts) / 3600.0, 2)
+        except (ValueError, OSError, OverflowError):
+            pass
+
+    # SerpAPI returns categories as list of {id, name}; flatten to names
+    raw_cats = raw.get("categories") or []
+    categories = [c.get("name") for c in raw_cats if isinstance(c, dict) and c.get("name")]
+
+    return {
+        "id": f"{_slugify(query)}-{start_ts or 0}",
+        "query": query,
+        "search_volume": raw.get("search_volume"),
+        "velocity_pct": raw.get("increase_percentage"),
+        "active": bool(raw.get("active", False)),
+        "started_at": started_at_iso,
+        "hours_trending": hours_trending,
+        "categories": categories,
+        "trend_breakdown": raw.get("trend_breakdown") or [],
+        "news_page_token": raw.get("news_page_token"),
+    }
 
 
 # ── TWITTER SEARCH HELPER ────────────────────────────────────────────────────
@@ -134,6 +181,7 @@ def home():
         "endpoints": {
             "/trends/google": "Google Trends via SerpAPI",
             "/trends/google/rss": "Google Trends RSS (free fallback)",
+            "/pulse/trends/raw": "Pulse normalized active trends (?geo=US&limit=30)",
             "/trends/twitter/search": "Tweet search for a query (?query=X&limit=10)",
             "/trends/reddit": "Hot Reddit posts (?subreddits=X,Y&limit=20)",
             "/health": "Health check",
@@ -162,6 +210,63 @@ def get_google_trends_rss():
         result["trends"] = result["trends"][:limit]
         return jsonify(result)
     return jsonify({"error": "Failed to fetch RSS trends", "details": result}), 500
+
+
+@app.route("/pulse/trends/raw")
+def get_pulse_trends_raw():
+    """
+    Pulse Chunk 1 — normalized raw trends from Google Trends.
+
+    Steps:
+      1. Call get_trending_searches (existing SerpAPI Trending Now)
+      2. Filter to active == true
+      3. Sort by search_volume descending
+      4. Take top N (default 30, max 50)
+      5. Normalize each into Pulse trend schema
+      6. Cache in-memory per geo, 1h TTL
+    """
+    geo   = request.args.get("geo", "US").upper()
+    limit = request.args.get("limit", type=int, default=30)
+    limit = max(1, min(limit, 50))  # clamp to [1,50]
+
+    cache_key = f"{geo}:{limit}"
+    cached = _cache_get(_pulse_trends_cache, cache_key)
+    if cached:
+        return jsonify({**cached, "cached": True})
+
+    # Fetch raw trends from SerpAPI (existing collector)
+    raw = google_trends_serpapi.get_trending_searches(
+        geo=geo, limit=None, api_key=get_serpapi_key()
+    )
+    if not raw.get("success"):
+        return jsonify({
+            "success": False,
+            "error": "Failed to fetch trends from SerpAPI",
+            "details": raw,
+        }), 502
+
+    all_trends = raw.get("trends", []) or []
+    active_trends = [t for t in all_trends if t.get("active")]
+
+    # Sort by search_volume descending (treat missing volume as 0)
+    active_trends.sort(key=lambda t: t.get("search_volume") or 0, reverse=True)
+
+    top = active_trends[:limit]
+    normalized = [_normalize_trend(t) for t in top]
+
+    response = {
+        "success": True,
+        "source": "serpapi_trending_now",
+        "geo": geo,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "count": len(normalized),
+        "total_active_available": len(active_trends),
+        "total_raw_available": len(all_trends),
+        "trends": normalized,
+        "cached": False,
+    }
+    _cache_set(_pulse_trends_cache, cache_key, response, PULSE_TRENDS_CACHE_TTL)
+    return jsonify(response)
 
 
 @app.route("/trends/twitter/search")
