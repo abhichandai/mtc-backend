@@ -273,6 +273,7 @@ def get_pulse_trends_raw():
 # ── PULSE REDDIT DISCOVERY (Chunk 2) ─────────────────────────────────────────
 _pulse_reddit_cache = {}
 PULSE_REDDIT_CACHE_TTL = 1800  # 30 min — matches the dashboard Reddit cache
+PULSE_MAX_PER_SUBREDDIT = 3    # surface only the N hottest topics per subreddit
 
 # Fallback cultural subreddit set — mirrors the profiles.pulse_subreddits column
 # default. Used ONLY when the client sends no list (e.g. isolated testing).
@@ -389,9 +390,22 @@ def get_pulse_trends_reddit():
     max_score = max((s for _, s in scored), default=0) or 1.0
     scored.sort(key=lambda ps: ps[1], reverse=True)
 
+    # Cap at the N hottest posts per subreddit so one busy community (e.g. an
+    # NBA playoff night) can't monopolise the feed. The list is already sorted
+    # by velocity desc, so the first N seen per subreddit ARE its hottest N.
+    # max_score is taken pre-cap, so the hottest post stays 1.0 regardless.
+    per_sub_count = {}
+    capped = []
+    for p, s in scored:
+        sub = (p.get("subreddit") or "").lower()
+        if per_sub_count.get(sub, 0) >= PULSE_MAX_PER_SUBREDDIT:
+            continue
+        per_sub_count[sub] = per_sub_count.get(sub, 0) + 1
+        capped.append((p, s))
+
     normalized = [
         _normalize_reddit_trend(p, round(s / max_score, 4))
-        for p, s in scored[:limit]
+        for p, s in capped[:limit]
     ]
 
     response = {
