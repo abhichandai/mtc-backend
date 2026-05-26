@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from collectors.twitter_search import TwitterTrendsCollector
 from collectors.google_trends_rss import GoogleTrendsRSS
-from collectors.reddit_collector import fetch_multiple_subreddits
+from collectors.reddit_collector import fetch_multiple_subreddits, _velocity_score
 import collectors.google_trends_serpapi as google_trends_serpapi
 
 app = Flask(__name__)
@@ -182,6 +182,7 @@ def home():
             "/trends/google": "Google Trends via SerpAPI",
             "/trends/google/rss": "Google Trends RSS (free fallback)",
             "/pulse/trends/raw": "Pulse normalized active trends (?geo=US&limit=30)",
+            "/pulse/trends/reddit": "Pulse Reddit discovery trends (?subreddits=news,nba&limit=30)",
             "/trends/twitter/search": "Tweet search for a query (?query=X&limit=10)",
             "/trends/reddit": "Hot Reddit posts (?subreddits=X,Y&limit=20)",
             "/health": "Health check",
@@ -266,6 +267,145 @@ def get_pulse_trends_raw():
         "cached": False,
     }
     _cache_set(_pulse_trends_cache, cache_key, response, PULSE_TRENDS_CACHE_TTL)
+    return jsonify(response)
+
+
+# ── PULSE REDDIT DISCOVERY (Chunk 2) ─────────────────────────────────────────
+_pulse_reddit_cache = {}
+PULSE_REDDIT_CACHE_TTL = 1800  # 30 min — matches the dashboard Reddit cache
+
+# Fallback cultural subreddit set — mirrors the profiles.pulse_subreddits column
+# default. Used ONLY when the client sends no list (e.g. isolated testing).
+# Source of truth for real users is their profiles row.
+PULSE_DEFAULT_SUBREDDITS = [
+    "news", "worldnews", "politics",
+    "popculturechat", "entertainment", "television", "Music", "movies",
+    "sports", "nba", "nfl",
+    "technology", "business", "OutOfTheLoop",
+]
+
+# Subreddit → Pulse category. Pure display logic so Reddit cards work with the
+# existing (Google-derived) category filter. Keys matched lowercase.
+SUBREDDIT_CATEGORY_MAP = {
+    "news": "News", "worldnews": "News", "politics": "News",
+    "popculturechat": "Entertainment", "entertainment": "Entertainment",
+    "television": "Entertainment", "music": "Entertainment", "movies": "Entertainment",
+    "sports": "Sports", "nba": "Sports", "nfl": "Sports",
+    "technology": "Business", "business": "Business", "outoftheloop": "Business",
+}
+
+
+def _subreddit_category(subreddit):
+    return SUBREDDIT_CATEGORY_MAP.get((subreddit or "").lower(), "Trending")
+
+
+def _normalize_reddit_trend(post, velocity_norm):
+    """Map a Reddit post (collector shape) to the Pulse trend schema.
+
+    Option (b): Reddit has no search_volume, so that stays null; the upvote
+    count rides in its own descriptive field (reddit_upvotes). source,
+    velocity, subreddit and permalink are additive — Google trends won't
+    carry them, and the frontend branches on `source` for display.
+    """
+    subreddit = post.get("subreddit", "")
+    post_id = post.get("id", "")
+    created = post.get("created_utc", 0)
+
+    started_at_iso = None
+    hours_trending = None
+    if isinstance(created, (int, float)) and created > 0:
+        try:
+            started_at_iso = datetime.fromtimestamp(created, tz=timezone.utc).isoformat()
+            hours_trending = round((time.time() - created) / 3600.0, 2)
+        except (ValueError, OSError, OverflowError):
+            pass
+
+    # trend_breakdown = free context chips on the card: subreddit + flair
+    breakdown = []
+    if subreddit:
+        breakdown.append(f"r/{subreddit}")
+    flair = post.get("flair") or ""
+    if flair:
+        breakdown.append(flair)
+
+    return {
+        "id": f"reddit-{_slugify(subreddit)}-{post_id}",
+        "query": post.get("title", ""),
+        "search_volume": None,           # option (b): Reddit has no search volume
+        "velocity_pct": None,            # Reddit has no % increase metric
+        "active": True,                  # live hot posts are always active
+        "started_at": started_at_iso,
+        "hours_trending": hours_trending,
+        "categories": [_subreddit_category(subreddit)],
+        "trend_breakdown": breakdown,
+        "news_page_token": None,
+        # ── Reddit-specific additive fields ──
+        "source": "reddit",
+        "reddit_upvotes": post.get("score", 0),
+        "subreddit": f"r/{subreddit}" if subreddit else "",
+        "velocity": velocity_norm,       # normalised 0–1 within this source
+        "permalink": post.get("permalink", ""),
+    }
+
+
+@app.route("/pulse/trends/reddit")
+def get_pulse_trends_reddit():
+    """
+    Pulse Chunk 2 — Reddit as an independent discovery source.
+
+    Pulls hot posts from the given (or default) subreddit set in parallel,
+    velocity-ranks them with the dashboard formula, normalises each to the
+    Pulse trend schema with source="reddit".
+
+    Query params:
+      subreddits  comma-separated bare names (e.g. news,nba). Falls back to
+                  PULSE_DEFAULT_SUBREDDITS when omitted.
+      limit       max cards returned (default 30, max 50)
+    """
+    subs_param = request.args.get("subreddits", "").strip()
+    if subs_param:
+        subreddits = [s.strip() for s in subs_param.split(",") if s.strip()]
+    else:
+        subreddits = list(PULSE_DEFAULT_SUBREDDITS)
+
+    subreddits = subreddits[:20]  # fan-out guardrail
+    if not subreddits:
+        return jsonify({"success": False, "error": "no subreddits to fetch"}), 400
+
+    limit = request.args.get("limit", type=int, default=30)
+    limit = max(1, min(limit, 50))
+
+    cache_key = ",".join(sorted(subreddits)) + f":limit={limit}"
+    cached = _cache_get(_pulse_reddit_cache, cache_key)
+    if cached:
+        return jsonify({**cached, "cached": True})
+
+    # Parallel fetch across all subreddits (reuses the collector + ThreadPool)
+    result = fetch_multiple_subreddits(subreddits, limit_per_sub=25)
+    posts = result.get("posts", []) if result.get("success") else []
+
+    # Score with the dashboard velocity formula, normalise to 0–1 within source
+    scored = [(p, _velocity_score(p)) for p in posts]
+    max_score = max((s for _, s in scored), default=0) or 1.0
+    scored.sort(key=lambda ps: ps[1], reverse=True)
+
+    normalized = [
+        _normalize_reddit_trend(p, round(s / max_score, 4))
+        for p, s in scored[:limit]
+    ]
+
+    response = {
+        "success": True,
+        "source": "reddit",
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "count": len(normalized),
+        "subreddits_requested": subreddits,
+        "subreddits_fetched": result.get("subreddits_fetched", []),
+        "subreddits_failed": result.get("subreddits_failed", []),
+        "trends": normalized,
+        "cached": False,
+    }
+    _cache_set(_pulse_reddit_cache, cache_key, response, PULSE_REDDIT_CACHE_TTL)
     return jsonify(response)
 
 
