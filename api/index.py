@@ -15,6 +15,7 @@ import time
 import hashlib
 import requests
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from collectors.twitter_search import TwitterTrendsCollector
 from collectors.google_trends_rss import GoogleTrendsRSS
@@ -183,6 +184,7 @@ def home():
             "/trends/google/rss": "Google Trends RSS (free fallback)",
             "/pulse/trends/raw": "Pulse normalized active trends (?geo=US&limit=30)",
             "/pulse/trends/reddit": "Pulse Reddit discovery trends (?subreddits=news,nba&limit=30)",
+            "/pulse/enrich": "Cross-platform enrichment for a trend (?query=topic&limit=5)",
             "/trends/twitter/search": "Tweet search for a query (?query=X&limit=10)",
             "/trends/reddit": "Hot Reddit posts (?subreddits=X,Y&limit=20)",
             "/health": "Health check",
@@ -420,6 +422,228 @@ def get_pulse_trends_reddit():
         "cached": False,
     }
     _cache_set(_pulse_reddit_cache, cache_key, response, PULSE_REDDIT_CACHE_TTL)
+    return jsonify(response)
+
+
+# ── PULSE ENRICHMENT (Chunk F1) ──────────────────────────────────────────────
+_pulse_enrich_cache = {}
+PULSE_ENRICH_CACHE_TTL = 1800  # 30 min
+
+
+def _fetch_tiktok_top_search(query, api_key, max_items=5):
+    """TikTok Top Search — returns videos + carousels matching the query."""
+    try:
+        resp = requests.get(
+            "https://api.scrapecreators.com/v1/tiktok/search/top",
+            headers={"x-api-key": api_key},
+            params={"query": query},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        if not data.get("success"):
+            return []
+        items = data.get("items", [])[:max_items]
+        results = []
+        for item in items:
+            stats = item.get("statistics", {})
+            author = item.get("author", {}) or {}
+            caption = item.get("desc", "")[:200]
+            results.append({
+                "title": caption or "(no caption)",
+                "author": author.get("nickname", author.get("unique_id", "")),
+                "author_handle": author.get("unique_id", ""),
+                "plays": stats.get("play_count", 0),
+                "likes": stats.get("digg_count", 0),
+                "comments": stats.get("comment_count", 0),
+                "shares": stats.get("share_count", 0),
+                "url": f"https://www.tiktok.com/@{author.get('unique_id', '')}/video/{item.get('aweme_id', item.get('id', ''))}",
+            })
+        return results
+    except Exception as e:
+        print(f"[enrich] TikTok error: {e}")
+        return []
+
+
+def _fetch_youtube_search(query, api_key, max_items=5):
+    """YouTube Search — returns videos matching the query."""
+    try:
+        resp = requests.get(
+            "https://api.scrapecreators.com/v1/youtube/search",
+            headers={"x-api-key": api_key},
+            params={"query": query},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        if not data.get("success"):
+            return []
+        videos = data.get("videos", [])[:max_items]
+        results = []
+        for v in videos:
+            ch = v.get("channel", {}) or {}
+            results.append({
+                "title": v.get("title", "")[:200],
+                "author": ch.get("title", ""),
+                "author_handle": ch.get("handle", ""),
+                "views": v.get("viewCountInt", v.get("viewCount", 0)),
+                "likes": v.get("likeCountInt", 0),
+                "comments": v.get("commentCountInt", 0),
+                "url": v.get("url", f"https://www.youtube.com/watch?v={v.get('id', '')}"),
+            })
+        # Also include shorts if present
+        shorts = data.get("shorts", [])[:2]
+        for s in shorts:
+            ch = s.get("channel", {}) or {}
+            results.append({
+                "title": s.get("title", "")[:200],
+                "author": ch.get("title", ""),
+                "author_handle": ch.get("handle", ""),
+                "views": s.get("viewCountInt", 0),
+                "likes": s.get("likeCountInt", 0),
+                "comments": s.get("commentCountInt", 0),
+                "url": s.get("url", ""),
+                "is_short": True,
+            })
+        return results[:max_items]
+    except Exception as e:
+        print(f"[enrich] YouTube error: {e}")
+        return []
+
+
+def _fetch_instagram_reels(query, api_key, max_items=5):
+    """Instagram Search Reels — returns reels matching the query."""
+    try:
+        resp = requests.get(
+            "https://api.scrapecreators.com/v2/instagram/reels/search",
+            headers={"x-api-key": api_key},
+            params={"query": query},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        if not data.get("success"):
+            return []
+        reels = data.get("reels", data.get("items", []))[:max_items]
+        results = []
+        for r in reels:
+            user = r.get("user", r.get("owner", {})) or {}
+            caption = r.get("caption", {})
+            text = (caption.get("text", "") if isinstance(caption, dict) else str(caption or ""))[:200]
+            results.append({
+                "title": text or "(no caption)",
+                "author": user.get("full_name", user.get("username", "")),
+                "author_handle": user.get("username", ""),
+                "plays": r.get("play_count", 0) or 0,
+                "likes": r.get("like_count", 0) or 0,
+                "comments": r.get("comment_count", 0) or 0,
+                "url": r.get("url", f"https://www.instagram.com/reel/{r.get('shortcode', r.get('code', ''))}"),
+            })
+        return results
+    except Exception as e:
+        print(f"[enrich] Instagram error: {e}")
+        return []
+
+
+def _fetch_linkedin_posts(query, api_key, max_items=5):
+    """LinkedIn Search Posts — returns professional posts matching the query."""
+    try:
+        resp = requests.get(
+            "https://api.scrapecreators.com/v1/linkedin/search/posts",
+            headers={"x-api-key": api_key},
+            params={"query": query},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        if not data.get("success"):
+            return []
+        posts = data.get("posts", [])[:max_items]
+        results = []
+        for p in posts:
+            author = p.get("author", {}) or {}
+            desc = p.get("description", p.get("name", ""))[:200]
+            results.append({
+                "title": desc or "(no text)",
+                "author": author.get("name", ""),
+                "author_url": author.get("url", ""),
+                "followers": author.get("followers", 0),
+                "likes": p.get("likeCount", 0) or 0,
+                "comments": p.get("commentCount", 0) or 0,
+                "url": p.get("url", ""),
+            })
+        return results
+    except Exception as e:
+        print(f"[enrich] LinkedIn error: {e}")
+        return []
+
+
+@app.route("/pulse/enrich")
+def get_pulse_enrichment():
+    """
+    Pulse Chunk F1 — Cross-platform enrichment for a trend topic.
+
+    Fires TikTok, YouTube, Instagram, and LinkedIn search queries in parallel
+    and returns normalised results grouped by platform.
+
+    Query params:
+      query   The trend title to search for (required)
+      limit   Max items per platform (default 5, max 8)
+    """
+    query = request.args.get("query", "").strip()
+    if not query:
+        return jsonify({"success": False, "error": "query parameter required"}), 400
+
+    limit = request.args.get("limit", type=int, default=5)
+    limit = max(1, min(limit, 8))
+
+    cache_key = f"{query.lower().strip()}:limit={limit}"
+    cached = _cache_get(_pulse_enrich_cache, cache_key)
+    if cached:
+        return jsonify({**cached, "cached": True})
+
+    api_key = os.environ.get("SCRAPECREATORS_API_KEY", "")
+    if not api_key:
+        return jsonify({"success": False, "error": "SCRAPECREATORS_API_KEY not set"}), 500
+
+    # Fire all 4 platform searches in parallel
+    platform_fetchers = {
+        "tiktok": (_fetch_tiktok_top_search, query, api_key, limit),
+        "youtube": (_fetch_youtube_search, query, api_key, limit),
+        "instagram": (_fetch_instagram_reels, query, api_key, limit),
+        "linkedin": (_fetch_linkedin_posts, query, api_key, limit),
+    }
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(fn, *args): platform
+            for platform, (fn, *args) in platform_fetchers.items()
+        }
+        for future in as_completed(futures):
+            platform = futures[future]
+            try:
+                results[platform] = future.result(timeout=12)
+            except Exception as e:
+                print(f"[enrich] {platform} failed: {e}")
+                results[platform] = []
+
+    response = {
+        "success": True,
+        "query": query,
+        "platforms": {
+            "tiktok": {"name": "TikTok", "items": results.get("tiktok", [])},
+            "youtube": {"name": "YouTube", "items": results.get("youtube", [])},
+            "instagram": {"name": "Instagram", "items": results.get("instagram", [])},
+            "linkedin": {"name": "LinkedIn", "items": results.get("linkedin", [])},
+        },
+        "cached": False,
+    }
+    _cache_set(_pulse_enrich_cache, cache_key, response, PULSE_ENRICH_CACHE_TTL)
     return jsonify(response)
 
 
