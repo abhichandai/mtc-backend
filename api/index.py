@@ -601,7 +601,15 @@ def get_pulse_enrichment():
     limit = request.args.get("limit", type=int, default=5)
     limit = max(1, min(limit, 8))
 
-    cache_key = f"{query.lower().strip()}:limit={limit}"
+    # Optional LLM-extracted search phrase for YouTube. YouTube's search
+    # tokenizer struggles with long headline-style queries from Reddit; the
+    # frontend bridge route extracts a short 3-5 word phrase via Sonnet and
+    # passes it here. Falls back to the main query if not provided.
+    youtube_query = (request.args.get("youtube_query") or "").strip() or query
+
+    # Cache key includes the youtube_query so we don't serve YT-mismatched
+    # results when the same query has a different YT phrase.
+    cache_key = f"{query.lower().strip()}|yt={youtube_query.lower()}:limit={limit}"
     cached = _cache_get(_pulse_enrich_cache, cache_key)
     if cached:
         return jsonify({**cached, "cached": True})
@@ -610,10 +618,12 @@ def get_pulse_enrichment():
     if not api_key:
         return jsonify({"success": False, "error": "SCRAPECREATORS_API_KEY not set"}), 500
 
-    # Fire all 4 platform searches in parallel
+    # Fire all 4 platform searches in parallel. YouTube gets the focused
+    # phrase; the rest use the original query (their searches handle long
+    # headline-style queries fine).
     platform_fetchers = {
         "tiktok": (_fetch_tiktok_top_search, query, api_key, limit),
-        "youtube": (_fetch_youtube_search, query, api_key, limit),
+        "youtube": (_fetch_youtube_search, youtube_query, api_key, limit),
         "instagram": (_fetch_instagram_reels, query, api_key, limit),
         "linkedin": (_fetch_linkedin_posts, query, api_key, limit),
     }
