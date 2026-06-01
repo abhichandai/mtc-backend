@@ -599,11 +599,18 @@ def _fetch_instagram_reels(query, api_key, max_items=5):
                 r.get("taken_at") or r.get("taken_at_timestamp") or
                 (caption.get("created_at_utc") if isinstance(caption, dict) else None)
             )
+            # IG returns engagement counts under different field names depending on
+            # the media type. Try several. play_count is for reels; view_count covers
+            # video posts; ig_play_count is rare but seen in some payloads.
+            plays = (
+                r.get("play_count") or r.get("view_count") or
+                r.get("video_view_count") or r.get("ig_play_count") or 0
+            )
             results.append({
                 "title": text or "(no caption)",
                 "author": user.get("full_name", user.get("username", "")),
                 "author_handle": user.get("username", ""),
-                "plays": r.get("play_count", 0) or 0,
+                "plays": plays,
                 "likes": r.get("like_count", 0) or 0,
                 "comments": r.get("comment_count", 0) or 0,
                 "url": r.get("url", f"https://www.instagram.com/reel/{r.get('shortcode', r.get('code', ''))}"),
