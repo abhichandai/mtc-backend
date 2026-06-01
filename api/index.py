@@ -14,8 +14,9 @@ import json
 import time
 import hashlib
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
 
 from collectors.twitter_search import TwitterTrendsCollector
 from collectors.google_trends_rss import GoogleTrendsRSS
@@ -23,6 +24,55 @@ from collectors.reddit_collector import fetch_multiple_subreddits, _velocity_sco
 import collectors.google_trends_serpapi as google_trends_serpapi
 
 app = Flask(__name__)
+
+
+# ── TIMESTAMP NORMALIZATION (for enrichment recency badges) ──────────────────
+_REL_RE = re.compile(r'(\d+)\s*(second|minute|hour|day|week|month|year)s?\s*ago', re.IGNORECASE)
+_REL_MULTIPLIERS = {
+    'second': 1, 'minute': 60, 'hour': 3600,
+    'day': 86400, 'week': 604800,
+    'month': 2592000, 'year': 31536000,
+}
+
+
+def _parse_relative(s):
+    """Parse YouTube-style 'N units ago' into ISO string. Returns None if no match."""
+    m = _REL_RE.search(s)
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2).lower()
+    secs = n * _REL_MULTIPLIERS[unit]
+    return (datetime.now(tz=timezone.utc) - timedelta(seconds=secs)).isoformat()
+
+
+def _parse_timestamp(value):
+    """Normalize various timestamp formats to ISO 8601. Handles Unix seconds/ms,
+    ISO strings, and relative 'N units ago' phrases. Returns None if unparseable."""
+    if value is None or value == "":
+        return None
+    # Unix timestamp (int or float, seconds or milliseconds)
+    if isinstance(value, (int, float)):
+        try:
+            ts = float(value)
+            if ts > 1e12:  # milliseconds
+                ts /= 1000.0
+            if 1e8 < ts < 1e11:  # sanity: between ~1973 and ~5138
+                return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        except (ValueError, OSError, OverflowError):
+            return None
+        return None
+    if isinstance(value, str):
+        # Try ISO 8601 (handle Z suffix)
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s.replace('Z', '+00:00')).astimezone(timezone.utc).isoformat()
+        except ValueError:
+            pass
+        # YouTube-style relative phrase
+        return _parse_relative(s)
+    return None
 CORS(app)
 
 # ── CREDENTIALS (from Vercel env vars) ───────────────────────────────────────
@@ -450,6 +500,9 @@ def _fetch_tiktok_top_search(query, api_key, max_items=5):
             stats = item.get("statistics", {})
             author = item.get("author", {}) or {}
             caption = item.get("desc", "")[:200]
+            posted_at = _parse_timestamp(
+                item.get("create_time") or item.get("createTime") or item.get("createdAt")
+            )
             results.append({
                 "title": caption or "(no caption)",
                 "author": author.get("nickname", author.get("unique_id", "")),
@@ -459,6 +512,7 @@ def _fetch_tiktok_top_search(query, api_key, max_items=5):
                 "comments": stats.get("comment_count", 0),
                 "shares": stats.get("share_count", 0),
                 "url": f"https://www.tiktok.com/@{author.get('unique_id', '')}/video/{item.get('aweme_id', item.get('id', ''))}",
+                "posted_at": posted_at,
             })
         return results
     except Exception as e:
@@ -484,6 +538,9 @@ def _fetch_youtube_search(query, api_key, max_items=5):
         results = []
         for v in videos:
             ch = v.get("channel", {}) or {}
+            posted_at = _parse_timestamp(
+                v.get("publishedTime") or v.get("publishDate") or v.get("publishedTimeText")
+            )
             results.append({
                 "title": v.get("title", "")[:200],
                 "author": ch.get("title", ""),
@@ -492,11 +549,15 @@ def _fetch_youtube_search(query, api_key, max_items=5):
                 "likes": v.get("likeCountInt", 0),
                 "comments": v.get("commentCountInt", 0),
                 "url": v.get("url", f"https://www.youtube.com/watch?v={v.get('id', '')}"),
+                "posted_at": posted_at,
             })
         # Also include shorts if present
         shorts = data.get("shorts", [])[:2]
         for s in shorts:
             ch = s.get("channel", {}) or {}
+            posted_at = _parse_timestamp(
+                s.get("publishedTime") or s.get("publishDate") or s.get("publishedTimeText")
+            )
             results.append({
                 "title": s.get("title", "")[:200],
                 "author": ch.get("title", ""),
@@ -506,6 +567,7 @@ def _fetch_youtube_search(query, api_key, max_items=5):
                 "comments": s.get("commentCountInt", 0),
                 "url": s.get("url", ""),
                 "is_short": True,
+                "posted_at": posted_at,
             })
         return results[:max_items]
     except Exception as e:
@@ -533,6 +595,10 @@ def _fetch_instagram_reels(query, api_key, max_items=5):
             user = r.get("user", r.get("owner", {})) or {}
             caption = r.get("caption", {})
             text = (caption.get("text", "") if isinstance(caption, dict) else str(caption or ""))[:200]
+            posted_at = _parse_timestamp(
+                r.get("taken_at") or r.get("taken_at_timestamp") or
+                (caption.get("created_at_utc") if isinstance(caption, dict) else None)
+            )
             results.append({
                 "title": text or "(no caption)",
                 "author": user.get("full_name", user.get("username", "")),
@@ -541,6 +607,7 @@ def _fetch_instagram_reels(query, api_key, max_items=5):
                 "likes": r.get("like_count", 0) or 0,
                 "comments": r.get("comment_count", 0) or 0,
                 "url": r.get("url", f"https://www.instagram.com/reel/{r.get('shortcode', r.get('code', ''))}"),
+                "posted_at": posted_at,
             })
         return results
     except Exception as e:
@@ -567,6 +634,9 @@ def _fetch_linkedin_posts(query, api_key, max_items=5):
         for p in posts:
             author = p.get("author", {}) or {}
             desc = p.get("description", p.get("name", ""))[:200]
+            posted_at = _parse_timestamp(
+                p.get("postedAt") or p.get("posted_at") or p.get("time") or p.get("publishedAt")
+            )
             results.append({
                 "title": desc or "(no text)",
                 "author": author.get("name", ""),
@@ -575,6 +645,7 @@ def _fetch_linkedin_posts(query, api_key, max_items=5):
                 "likes": p.get("likeCount", 0) or 0,
                 "comments": p.get("commentCount", 0) or 0,
                 "url": p.get("url", ""),
+                "posted_at": posted_at,
             })
         return results
     except Exception as e:
